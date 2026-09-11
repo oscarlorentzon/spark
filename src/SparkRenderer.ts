@@ -8,6 +8,7 @@ import {
   SplatMesh,
   SplatPager,
 } from ".";
+import { DepthKeyReadback, getDepthKeyLayers } from "./DepthKeyReadback";
 import { SplatAccumulator } from "./SplatAccumulator";
 import { SplatGeometry } from "./SplatGeometry";
 import { SplatWorker } from "./SplatWorker";
@@ -454,7 +455,15 @@ export class SparkRenderer extends THREE.Mesh {
   superXY = 1;
 
   flushAfterGenerate = false;
-  flushAfterRead = false;
+
+  private readonly depthKeys: DepthKeyReadback;
+  private pendingSort: {
+    accumulator: SplatAccumulator;
+    numSplats: number;
+    rows: number;
+    readback: Uint32Array;
+  } | null = null;
+  private warnedReadFailed = false;
 
   constructor(options: SparkRendererOptions) {
     if (!options) {
@@ -557,10 +566,11 @@ export class SparkRenderer extends THREE.Mesh {
     this.accumulators.push(new SplatAccumulator(accumulatorOptions));
     this.accumulators.push(new SplatAccumulator(accumulatorOptions));
 
+    const gl = this.renderer.getContext() as WebGL2RenderingContext;
+    this.depthKeys = new DepthKeyReadback(gl);
+
     // Check if the provoking vertex convention should be changed
-    const provokingVertexExt = this.renderer
-      .getContext()
-      .getExtension("WEBGL_provoking_vertex");
+    const provokingVertexExt = gl.getExtension("WEBGL_provoking_vertex");
     if (provokingVertexExt) {
       provokingVertexExt.provokingVertexWEBGL(
         provokingVertexExt.FIRST_VERTEX_CONVENTION_WEBGL,
@@ -700,6 +710,8 @@ export class SparkRenderer extends THREE.Mesh {
     for (const instance of instances) {
       instance.texture.dispose();
     }
+
+    this.depthKeys.dispose();
 
     if (this.sortWorker) {
       this.sortWorker.dispose();
@@ -911,6 +923,8 @@ export class SparkRenderer extends THREE.Mesh {
       this.timer.update();
     }
 
+    this.pollDepthKeys();
+
     const center = camera.getWorldPosition(new THREE.Vector3());
     const dir = camera.getWorldDirection(new THREE.Vector3());
 
@@ -1026,17 +1040,110 @@ export class SparkRenderer extends THREE.Mesh {
     const orderingMaxSplats = rows * 16384;
     this.maxSplats = Math.max(this.maxSplats, orderingMaxSplats);
 
-    const ordering = new Uint32Array(this.maxSplats);
     const readback = Readback.ensureBuffer(maxSplats, this.readback32);
     this.readback32 = readback;
 
-    await this.readbackDepth({
-      current,
-      renderer: this.renderer,
-      numSplats,
-      readback,
-    });
+    try {
+      this.issueDepthKeys({ current, numSplats, rows, readback });
+    } catch (error) {
+      // Leaving sorting set would block every later sort, not just this one.
+      this.sorting = false;
+      throw error;
+    }
+  }
 
+  private issueDepthKeys({
+    current,
+    numSplats,
+    rows,
+    readback,
+  }: {
+    current: SplatAccumulator;
+    numSplats: number;
+    rows: number;
+    readback: Uint32Array;
+  }) {
+    const renderer = this.renderer;
+    if (!current.target) {
+      throw new Error("No target");
+    }
+    const roundedCount =
+      Math.ceil(numSplats / SPLAT_TEX_WIDTH) * SPLAT_TEX_WIDTH;
+    if (readback.byteLength < roundedCount * 4) {
+      throw new Error(
+        `Readback buffer too small: ${readback.byteLength} < ${roundedCount * 4}`,
+      );
+    }
+
+    const pending = { accumulator: current, numSplats, rows, readback };
+    const layers = getDepthKeyLayers(numSplats);
+    if (layers.length === 0) {
+      // No splats, so no keys to read. The sort still has to finish or
+      // sorting stays set and no later sort runs.
+      this.pendingSort = null;
+      void this.finishSort(pending);
+      return;
+    }
+
+    const target = current.target;
+    const renderState = this.saveRenderState(renderer);
+    const issued = this.depthKeys.issue({
+      layers,
+      attachment: current.extSplats ? 2 : 1,
+      bindLayer: (layer) => renderer.setRenderTarget(target, layer),
+    });
+    this.resetRenderState(renderer, renderState);
+
+    this.pendingSort = pending;
+    if (!issued) {
+      // No fence, so the keys will never arrive.
+      this.takeDepthKeys(false);
+    }
+  }
+
+  private pollDepthKeys() {
+    if (!this.depthKeys.isPending()) {
+      return;
+    }
+    const status = this.depthKeys.poll();
+    if (status === "pending") {
+      return;
+    }
+    this.takeDepthKeys(status === "ready");
+  }
+
+  private takeDepthKeys(ready: boolean) {
+    const pending = this.pendingSort;
+    this.pendingSort = null;
+    if (!pending) {
+      return;
+    }
+    if (!ready) {
+      if (!this.warnedReadFailed) {
+        this.warnedReadFailed = true;
+        console.warn("Spark: sort key readback fence failed");
+      }
+      this.sorting = false;
+      this.sortDirty = true;
+      return;
+    }
+    this.depthKeys.copyInto(new Uint8Array(pending.readback.buffer));
+    void this.finishSort(pending);
+  }
+
+  private async finishSort({
+    accumulator,
+    numSplats,
+    rows,
+    readback,
+  }: {
+    accumulator: SplatAccumulator;
+    numSplats: number;
+    rows: number;
+    readback: Uint32Array;
+  }) {
+    const current = accumulator;
+    const ordering = new Uint32Array(this.maxSplats);
     if (!this.sortWorker) {
       this.sortWorker = new SplatWorker();
     }
@@ -1083,8 +1190,6 @@ export class SparkRenderer extends THREE.Mesh {
         );
       }
     }
-
-    // console.log(`Sorted (${this.minSortIntervalMs}) ${numSplats} splats in ${(performance.now() - now).toFixed(0)} ms`);
 
     if (this.current.mappingVersion === current.mappingVersion) {
       if (this.current.mappingVersion !== this.display.mappingVersion) {
@@ -1614,81 +1719,6 @@ export class SparkRenderer extends THREE.Mesh {
       }
       mesh.updateMappingVersion();
     }
-  }
-
-  private async readbackDepth({
-    current,
-    renderer,
-    numSplats,
-    readback,
-  }: {
-    current: SplatAccumulator;
-    renderer: THREE.WebGLRenderer;
-    numSplats: number;
-    readback: Uint32Array;
-  }) {
-    if (!renderer) {
-      throw new Error("No renderer");
-    }
-    if (!current.target) {
-      throw new Error("No target");
-    }
-
-    const roundedCount =
-      Math.ceil(numSplats / SPLAT_TEX_WIDTH) * SPLAT_TEX_WIDTH;
-    if (readback.byteLength < roundedCount * 4) {
-      throw new Error(
-        `Readback buffer too small: ${readback.byteLength} < ${roundedCount * 4}`,
-      );
-    }
-    const readbackUint8 = new Uint8Array(readback.buffer);
-    const renderState = this.saveRenderState(renderer);
-
-    // We can only read back one 2D array layer of pixels at a time,
-    // so loop through them, initiate the readback, and collect the
-    // completion promises.
-    const layerSize = SPLAT_TEX_WIDTH * SPLAT_TEX_HEIGHT;
-    let baseIndex = 0;
-    const promises = [];
-
-    while (baseIndex < numSplats) {
-      const layer = Math.floor(baseIndex / layerSize);
-      const layerBase = layer * layerSize;
-      const layerYEnd = Math.min(
-        SPLAT_TEX_HEIGHT,
-        Math.ceil((numSplats - layerBase) / SPLAT_TEX_WIDTH),
-      );
-
-      // Compute the subarray that this layer of readback corresponds to
-      const readbackSize = SPLAT_TEX_WIDTH * layerYEnd * 4;
-      const subReadback = readbackUint8.subarray(
-        layerBase * 4,
-        layerBase * 4 + readbackSize,
-      );
-      renderer.setRenderTarget(current.target, layer);
-
-      const promise = renderer.readRenderTargetPixelsAsync(
-        current.target,
-        0,
-        0,
-        SPLAT_TEX_WIDTH,
-        layerYEnd,
-        subReadback,
-        undefined,
-        current.extSplats ? 2 : 1,
-      );
-      promises.push(promise);
-
-      if (this.flushAfterRead) {
-        const gl = renderer.getContext() as WebGL2RenderingContext;
-        gl.flush();
-      }
-
-      baseIndex += SPLAT_TEX_WIDTH * layerYEnd;
-    }
-
-    this.resetRenderState(renderer, renderState);
-    return Promise.all(promises).then(() => readback);
   }
 
   private saveRenderState(renderer: THREE.WebGLRenderer) {
