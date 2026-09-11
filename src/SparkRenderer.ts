@@ -455,9 +455,6 @@ export class SparkRenderer extends THREE.Mesh {
 
   flushAfterGenerate = false;
   flushAfterRead = false;
-  readPause = 1;
-  sortPause = 0;
-  sortDelay = 0;
 
   constructor(options: SparkRendererOptions) {
     if (!options) {
@@ -1019,10 +1016,6 @@ export class SparkRenderer extends THREE.Mesh {
     this.sortDirty = false;
     this.lastSortTime = now;
 
-    if (this.readPause > 0) {
-      await new Promise((resolve) => setTimeout(resolve, this.readPause));
-    }
-
     const current = this.current;
 
     this.sortedCenter.copy(current.viewOrigin);
@@ -1044,10 +1037,6 @@ export class SparkRenderer extends THREE.Mesh {
       readback,
     });
 
-    if (this.sortPause > 0) {
-      await new Promise((resolve) => setTimeout(resolve, this.sortPause));
-    }
-
     if (!this.sortWorker) {
       this.sortWorker = new SplatWorker();
     }
@@ -1056,10 +1045,6 @@ export class SparkRenderer extends THREE.Mesh {
       readback,
       ordering,
     });
-
-    if (this.sortDelay > 0) {
-      await new Promise((resolve) => setTimeout(resolve, this.sortDelay));
-    }
 
     this.readback32 = result.readback;
 
