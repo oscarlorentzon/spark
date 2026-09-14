@@ -9,6 +9,7 @@ import {
   SplatPager,
 } from ".";
 import { DepthKeyReadback, getDepthKeyLayers } from "./DepthKeyReadback";
+import { FrameFenceGate } from "./FrameFenceGate";
 import { SplatAccumulator } from "./SplatAccumulator";
 import { SplatGeometry } from "./SplatGeometry";
 import { SplatWorker } from "./SplatWorker";
@@ -22,6 +23,12 @@ import {
   isVisionPro,
   uploadU32DataTextureRows,
 } from "./utils";
+
+/**
+ * Frames that may be queued to the GPU at once. Two lets one frame be shown
+ * while the next is drawn. More only adds latency.
+ */
+const MAX_FRAMES_IN_FLIGHT = 2;
 
 export interface SparkRendererOptions {
   /**
@@ -457,6 +464,7 @@ export class SparkRenderer extends THREE.Mesh {
   flushAfterGenerate = false;
 
   private readonly depthKeys: DepthKeyReadback;
+  private readonly frameGate: FrameFenceGate;
   private pendingSort: {
     accumulator: SplatAccumulator;
     numSplats: number;
@@ -568,6 +576,12 @@ export class SparkRenderer extends THREE.Mesh {
 
     const gl = this.renderer.getContext() as WebGL2RenderingContext;
     this.depthKeys = new DepthKeyReadback(gl);
+    this.frameGate = new FrameFenceGate(gl, {
+      maxFramesInFlight: MAX_FRAMES_IN_FLIGHT,
+      // An XR session already hands out the next frame only once the previous
+      // is submitted, and a skipped frame there is a dropped one in the headset.
+      bypass: () => this.renderer.xr.isPresenting,
+    });
 
     // Check if the provoking vertex convention should be changed
     const provokingVertexExt = gl.getExtension("WEBGL_provoking_vertex");
@@ -712,6 +726,7 @@ export class SparkRenderer extends THREE.Mesh {
     }
 
     this.depthKeys.dispose();
+    this.frameGate.dispose();
 
     if (this.sortWorker) {
       this.sortWorker.dispose();
@@ -725,6 +740,47 @@ export class SparkRenderer extends THREE.Mesh {
       this.pager.dispose();
       this.pager = undefined;
     }
+  }
+
+  /**
+   * Whether a new frame may be issued to the GPU. Call at the top of the render
+   * loop and skip the whole frame when false: skipping only the splat draw
+   * would make them vanish. SparkRenderer.setAnimationLoop does this for you.
+   */
+  canIssueFrame(): boolean {
+    const gate = this.frameGate;
+    const issue = gate.canIssueFrame();
+    if (!issue || gate.getFramesInFlight() === 0) {
+      // The queue is emptiest here, so this is the cheapest moment to take
+      // the keys.
+      this.pollDepthKeys();
+    }
+    return issue;
+  }
+
+  /**
+   * A drop-in for renderer.setAnimationLoop that skips a frame when the GPU is
+   * already two behind.
+   */
+  setAnimationLoop(callback: ((time: number, frame?: XRFrame) => void) | null) {
+    if (!callback) {
+      this.renderer.setAnimationLoop(null);
+      return;
+    }
+    this.renderer.setAnimationLoop((time, frame) => {
+      if (!this.canIssueFrame()) {
+        return;
+      }
+      callback(time, frame);
+    });
+  }
+
+  onAfterRender(renderer: THREE.WebGLRenderer) {
+    const spark = SparkRenderer.sparkOverride ?? this;
+    // Fenced here rather than in the loop so custom loops are covered too. The
+    // fence covers work up to the splat draw, so it can signal early, never
+    // late.
+    spark.frameGate.noteFrameEnd(renderer.info.render.frame);
   }
 
   setDirty() {
