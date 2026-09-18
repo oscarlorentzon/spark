@@ -1,8 +1,13 @@
-import type { PackedSplats } from "./PackedSplats";
+import { ExtSplats } from "./ExtSplats";
+import { PackedSplats } from "./PackedSplats";
 import { getSplatFileType, getSplatFileTypeFromPath } from "./SplatLoader";
 import type { SplatFileType } from "./defines";
 
-import { decode_to_gsplatarray, packedsplats_to_gsplatarray } from "spark-rs";
+import {
+  decode_to_gsplatarray,
+  extsplats_to_gsplatarray,
+  packedsplats_to_gsplatarray,
+} from "spark-rs";
 
 export type TranscodeSpzFileInput = {
   fileBytes: Uint8Array;
@@ -74,19 +79,35 @@ export async function transcodeSpz(input: TranscodeSpzInput) {
 }
 
 export function writeSpz(
-  packedSplats: PackedSplats,
+  splats: PackedSplats | ExtSplats,
   maxSh?: number,
   fractionalBits?: number,
 ) {
-  if (!packedSplats.packedArray) {
-    throw new Error("");
+  const shDegree = maxSh ?? 3;
+  const bits = fractionalBits ?? 12;
+
+  if (splats instanceof ExtSplats) {
+    const gsplats = extsplats_to_gsplatarray(
+      splats.numSplats,
+      splats.extArrays[0],
+      splats.extArrays[1],
+      splats.extra,
+    );
+    return { fileBytes: gsplats.encode_to_spz(shDegree, bits) };
   }
-  const gsplats = packedsplats_to_gsplatarray(
-    packedSplats.numSplats,
-    packedSplats.packedArray,
-    packedSplats.extra,
-    packedSplats.splatEncoding,
-  );
-  const spzBytes = gsplats.encode_to_spz(maxSh ?? 3, fractionalBits ?? 12);
-  return { fileBytes: spzBytes };
+
+  if (splats instanceof PackedSplats) {
+    if (!splats.packedArray) {
+      throw new Error("PackedSplats has no splat data");
+    }
+    const gsplats = packedsplats_to_gsplatarray(
+      splats.numSplats,
+      splats.packedArray,
+      splats.extra,
+      splats.splatEncoding,
+    );
+    return { fileBytes: gsplats.encode_to_spz(shDegree, bits) };
+  }
+
+  throw new Error("writeSpz requires PackedSplats or ExtSplats");
 }
