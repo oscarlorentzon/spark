@@ -624,18 +624,3 @@ export class SplatData {
     }
   }
 }
-
-export type FileInput = {
-  fileBytes: Uint8Array;
-  fileType?: SplatFileType;
-  pathOrUrl?: string;
-  transform?: { translate?: number[]; quaternion?: number[]; scale?: number };
-};
-
-export type TranscodeSpzInput = {
-  inputs: FileInput[];
-  maxSh?: number;
-  clipXyz?: { min: number[]; max: number[] };
-  fractionalBits?: number;
-  opacityThreshold?: number;
-};

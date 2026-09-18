@@ -1,11 +1,23 @@
 import type { PackedSplats } from "./PackedSplats";
-import {
-  type TranscodeSpzInput,
-  getSplatFileType,
-  getSplatFileTypeFromPath,
-} from "./SplatLoader";
+import { getSplatFileType, getSplatFileTypeFromPath } from "./SplatLoader";
+import type { SplatFileType } from "./defines";
 
 import { decode_to_gsplatarray, packedsplats_to_gsplatarray } from "spark-rs";
+
+export type TranscodeSpzFileInput = {
+  fileBytes: Uint8Array;
+  fileType?: SplatFileType;
+  pathOrUrl?: string;
+  transform?: { translate?: number[]; quaternion?: number[]; scale?: number };
+};
+
+export type TranscodeSpzInput = {
+  inputs: TranscodeSpzFileInput[];
+  maxSh?: number;
+  clipXyz?: { min: number[]; max: number[] };
+  fractionalBits?: number;
+  opacityThreshold?: number;
+};
 
 export async function transcodeSpz(input: TranscodeSpzInput) {
   const splatArrays = [];
