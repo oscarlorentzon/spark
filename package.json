@@ -38,7 +38,8 @@
     "site:deploy": "npm run site:build && node scripts/deploy-site.js",
     "site:serve": "node scripts/serve-site.js site",
     "start": "npm run dev",
-    "test": "node --no-warnings --loader ts-node/esm --test test/**/*.test.ts"
+    "test": "node --no-warnings --loader ts-node/esm --test test/**/*.test.ts",
+    "test:rust": "cargo test --locked --manifest-path rust/Cargo.toml --workspace"
   },
   "repository": "sparkjs-dev/spark",
   "files": ["dist"],
