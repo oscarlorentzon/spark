@@ -1,5 +1,6 @@
 const float LN_SCALE_MIN = -12.0;
 const float LN_SCALE_MAX = 9.0;
+const float ATANH_COR_MAX = 8.0;
 
 const uint SPLAT_TEX_WIDTH_BITS = 11u;
 const uint SPLAT_TEX_HEIGHT_BITS = 11u;
@@ -261,7 +262,8 @@ uvec4 packSplatCovEncoding(
         clamp(xyxzyz.y / sqrt(xxyyzz.x * xxyyzz.z), -1.0, 1.0),
         clamp(xyxzyz.z / sqrt(xxyyzz.y * xxyyzz.z), -1.0, 1.0)
     );
-    ivec3 iXyxzyzCor = ivec3(round(xyxzyzCor * 127.0));
+    vec3 atanhCor = atanh(xyxzyzCor * tanh(ATANH_COR_MAX));
+    ivec3 iXyxzyzCor = ivec3(round(clamp(atanhCor / ATANH_COR_MAX * 127.0, -127.0, 127.0)));
 
     // Pack it all into 4 x uint32
     uint word0 = uRgba.r | (uRgba.g << 8u) | (uRgba.b << 16u) | (uRgba.a << 24u);
@@ -297,7 +299,7 @@ void unpackSplatCovEncoding(uvec4 packedData, out vec3 center, out vec4 rgba, ou
     float diagScale = 2.0 * (lnScaleMax - lnScaleMin) / 255.0;
     xxyyzz = exp(2.0 * lnScaleMin + vec3(uXxyyzz) * diagScale);
 
-    vec3 xyxzyzCor = vec3(iXyxzyzCor) / 127.0;
+    vec3 xyxzyzCor = tanh(vec3(iXyxzyzCor) / 127.0 * ATANH_COR_MAX);
     xyxzyz = xyxzyzCor * vec3(
         sqrt(xxyyzz.x * xxyyzz.y),
         sqrt(xxyyzz.x * xxyyzz.z),
