@@ -16,6 +16,25 @@ test("renders furry-logo-pedestal", async ({ harnessPage }) => {
   expect(pngBuffer(png)).toMatchSnapshot("basic.png");
 });
 
+test("renders covariance splats with the packed accumulator", async ({
+  harnessPage,
+}) => {
+  const png = await harnessPage.evaluate(async () => {
+    const h = window.harness;
+    h.createSpark({ covSplats: true, accumExtSplats: false });
+    // Close enough that the fur's thin splats cover many pixels
+    h.createCamera({ fov: 60, position: [0, 0.5, 3.5], lookAt: [0, 0.3, 0] });
+    h.addSplatMesh({
+      url: "/test/browser/fixtures/furry-logo-pedestal.spz",
+      quaternion: [1, 0, 0, 0],
+    });
+    await h.settle();
+    return h.getPixels();
+  });
+
+  expect(pngBuffer(png)).toMatchSnapshot("basic-cov-packed.png");
+});
+
 test("renders with object and camera transforms", async ({ harnessPage }) => {
   const png = await harnessPage.evaluate(async () => {
     const h = window.harness;
