@@ -21,6 +21,7 @@ in vec2 vSplatUv;
 in vec3 vNdc;
 flat in uint vSplatIndex;
 flat in float adjustedStdDev;
+flat in float vRayC2;
 
 #include <logdepthbuf_pars_fragment>
 
@@ -28,6 +29,10 @@ void main() {
     vec4 rgba = vRgba;
 
     float z2 = dot(vSplatUv, vSplatUv);
+    if (vRayC2 > 0.0) {
+        // RayGS: squared distance at the maximum along the ray
+        z2 = z2 * vRayC2 / (vRayC2 + z2);
+    }
     if (z2 > (adjustedStdDev * adjustedStdDev)) {
         discard;
     }

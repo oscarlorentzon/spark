@@ -21,6 +21,15 @@ import {
   uploadU32DataTextureRows,
 } from "./utils";
 
+/** How SparkRenderer draws splats, see SparkRendererOptions.splatProjection */
+export type SplatProjection = "ewa" | "raygs";
+
+// Shader values for each projection, matching splatRayEval.glsl
+const SPLAT_PROJECTION_IDS: Record<SplatProjection, number> = {
+  ewa: 0,
+  raygs: 1,
+};
+
 export interface SparkRendererOptions {
   /**
    * Pass in your THREE.WebGLRenderer instance so Spark can perform work
@@ -106,6 +115,18 @@ export interface SparkRendererOptions {
    * @default false
    */
   // enableRayEval?: boolean;
+  /**
+   * How splats are drawn. "ewa" projects each splat to a 2D Gaussian on screen.
+   * "raygs" evaluates each splat at its maximum along the pixel ray, drawn as a quad
+   * in 3D, following "Hardware-Rasterized Ray-Based Gaussian Splatting" (Rota Bulò
+   * et al. 2025, https://arxiv.org/abs/2503.18682, reference implementation
+   * https://github.com/facebookresearch/vkraygs). With "raygs", splats that contain
+   * the camera are not drawn, minPixelRadius and maxPixelRadius are not applied, and
+   * covSplats use "ewa". With enable2DGS, splats with a zero scale keep the 2DGS path,
+   * which already evaluates them where the pixel ray meets their plane.
+   * @default "ewa"
+   */
+  splatProjection?: SplatProjection;
   /**
    * Scalar value to add to 2D splat covariance diagonal, effectively blurring +
    * enlarging splats. In scenes trained without the Gsplat anti-aliasing tweak
@@ -349,6 +370,7 @@ export class SparkRenderer extends THREE.Mesh {
   minAlpha: number;
   enable2DGS: boolean;
   // enableRayEval: boolean;
+  splatProjection: SplatProjection;
   preBlurAmount: number;
   blurAmount: number;
   focalDistance: number;
@@ -529,6 +551,7 @@ export class SparkRenderer extends THREE.Mesh {
     this.minAlpha = options.minAlpha ?? 0.5 * (1.0 / 255.0);
     this.enable2DGS = options.enable2DGS ?? false;
     // this.enableRayEval = options.enableRayEval ?? false;
+    this.splatProjection = options.splatProjection ?? "ewa";
     this.preBlurAmount = options.preBlurAmount ?? 0.0;
     this.blurAmount = options.blurAmount ?? 0.3;
     this.focalDistance = options.focalDistance ?? 0.0;
@@ -654,6 +677,8 @@ export class SparkRenderer extends THREE.Mesh {
       enable2DGS: { value: false },
       // Enable ray-splat max response evaluation
       // enableRayEval: { value: false },
+      // Splat projection method, from SPLAT_PROJECTION_IDS
+      splatProjection: { value: 0 },
       // Inflate LoD splats so that opacity <= 1.0
       lodInflate: { value: false },
       // Add to projected 2D splat covariance diagonal (thickens and brightens)
@@ -862,6 +887,8 @@ export class SparkRenderer extends THREE.Mesh {
     this.uniforms.minAlpha.value = spark.minAlpha;
     this.uniforms.enable2DGS.value = spark.enable2DGS;
     // this.uniforms.enableRayEval.value = spark.enableRayEval;
+    this.uniforms.splatProjection.value =
+      SPLAT_PROJECTION_IDS[spark.splatProjection] ?? 0;
     this.uniforms.lodInflate.value = spark.lodInflate;
     this.uniforms.preBlurAmount.value = spark.preBlurAmount;
     this.uniforms.blurAmount.value = spark.blurAmount;

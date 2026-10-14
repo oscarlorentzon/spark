@@ -4,12 +4,14 @@ precision highp int;
 precision highp usampler2DArray;
 
 #include <splatDefines>
+#include <splatRayEval>
 
 out vec4 vRgba;
 out vec2 vSplatUv;
 out vec3 vNdc;
 flat out uint vSplatIndex;
 flat out float adjustedStdDev;
+flat out float vRayC2;
 
 // uniform uint numSplats;
 uniform vec2 renderSize;
@@ -26,6 +28,7 @@ uniform float deltaTime;
 uniform bool debugFlag;
 uniform float minAlpha;
 uniform bool enable2DGS;
+uniform int splatProjection;
 uniform bool lodInflate;
 uniform float blurAmount;
 uniform float preBlurAmount;
@@ -33,6 +36,7 @@ uniform float focalDistance;
 uniform float apertureAngle;
 uniform float clipXY;
 uniform float focalAdjustment;
+uniform float falloff;
 
 uniform usampler2D ordering;
 uniform usampler2DArray extSplats;
@@ -148,9 +152,25 @@ void main() {
 
     vRgba = rgba;
     vSplatUv = position.xy * adjustedStdDev;
+    vRayC2 = 0.0;
 
     // Record the splat index for entropy
     vSplatIndex = splatIndex;
+
+    // Compute the focal length in pixels and the blur, including depth of field
+    vec2 scaledRenderSize = renderSize * focalAdjustment;
+    vec2 focal = 0.5 * scaledRenderSize * vec2(projectionMatrix[0][0], projectionMatrix[1][1]);
+
+    float fullBlurAmount = blurAmount;
+    if ((focalDistance > 0.0) && (apertureAngle > 0.0)) {
+        float focusRadius = maxPixelRadius;
+        if (viewCenter.z < 0.0) {
+            float focusBlur = abs((-viewCenter.z - focalDistance) / viewCenter.z);
+            float apertureRadius = focal.x * tan(0.5 * apertureAngle);
+            focusRadius = focusBlur * apertureRadius;
+        }
+        fullBlurAmount = clamp(sqr(focusRadius), blurAmount, sqr(maxPixelRadius));
+    }
 
     if (!enableCovSplats) {
         // Compute view space quaternion of splat
@@ -174,6 +194,28 @@ void main() {
             return;
         }
 
+        if (splatProjection == SPLAT_PROJECTION_RAYGS) {
+            mat3 R = quaternionToMatrix(viewQuaternion);
+            vec3 rayScales;
+            rgba.a *= rayEvalInflate(viewCenter, R, scales, focal, preBlurAmount, fullBlurAmount, rayScales);
+            if (rgba.a < minAlpha) {
+                return;
+            }
+            vRgba.a = rgba.a;
+
+            adjustedStdDev = rayEvalCutoff(rgba.a, adjustedStdDev, minAlpha, falloff);
+            RaySplat ray;
+            if (!rayEvalQuad(viewCenter, R, rayScales, adjustedStdDev, ray)) {
+                return;
+            }
+            vRayC2 = ray.c2;
+            gl_Position = rayEvalCorner(ray, position.xy, clipCenter, vSplatUv);
+            vNdc = gl_Position.xyz / gl_Position.w;
+
+            #include <logdepthbuf_vertex>
+            return;
+        }
+
         // Compute the 3D covariance matrix of the splat
         mat3 RS = scaleQuaternionToMatrix(scales, viewQuaternion);
         cov3D = RS * transpose(RS);
@@ -187,9 +229,6 @@ void main() {
     }
 
     // Compute the Jacobian of the splat's projection at its center
-    vec2 scaledRenderSize = renderSize * focalAdjustment;
-    vec2 focal = 0.5 * scaledRenderSize * vec2(projectionMatrix[0][0], projectionMatrix[1][1]);
-
     mat3 J;
     if (isOrthographic) {
         J = mat3(
@@ -218,17 +257,6 @@ void main() {
     // Optionally pre-blur the splat to match non-antialias optimized splats
     a += preBlurAmount;
     d += preBlurAmount;
-
-    float fullBlurAmount = blurAmount;
-    if ((focalDistance > 0.0) && (apertureAngle > 0.0)) {
-        float focusRadius = maxPixelRadius;
-        if (viewCenter.z < 0.0) {
-            float focusBlur = abs((-viewCenter.z - focalDistance) / viewCenter.z);
-            float apertureRadius = focal.x * tan(0.5 * apertureAngle);
-            focusRadius = focusBlur * apertureRadius;
-        }
-        fullBlurAmount = clamp(sqr(focusRadius), blurAmount, sqr(maxPixelRadius));
-    }
 
     // Do convolution with a 0.5-pixel Gaussian for anti-aliasing: sqrt(0.3) ~= 0.5
     float detOrig = a * d - b * b;
