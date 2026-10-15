@@ -262,7 +262,13 @@ uvec4 packSplatCovEncoding(
         clamp(xyxzyz.y / sqrt(xxyyzz.x * xxyyzz.z), -1.0, 1.0),
         clamp(xyxzyz.z / sqrt(xxyyzz.y * xxyyzz.z), -1.0, 1.0)
     );
-    vec3 atanhCor = atanh(xyxzyzCor * tanh(ATANH_COR_MAX));
+    // The yz correlation is stored as the partial correlation of y and z given x,
+    // so that any three stored values decode to a valid covariance
+    float spread = sqrt((1.0 - xyxzyzCor.x) * (1.0 + xyxzyzCor.x) * (1.0 - xyxzyzCor.y) * (1.0 + xyxzyzCor.y));
+    float yzGivenX = spread > 0.0
+        ? clamp((xyxzyzCor.z - xyxzyzCor.x * xyxzyzCor.y) / spread, -1.0, 1.0)
+        : 0.0;
+    vec3 atanhCor = atanh(vec3(xyxzyzCor.xy, yzGivenX) * tanh(ATANH_COR_MAX));
     ivec3 iXyxzyzCor = ivec3(round(clamp(atanhCor / ATANH_COR_MAX * 127.0, -127.0, 127.0)));
 
     // Pack it all into 4 x uint32
@@ -299,7 +305,9 @@ void unpackSplatCovEncoding(uvec4 packedData, out vec3 center, out vec4 rgba, ou
     float diagScale = 2.0 * (lnScaleMax - lnScaleMin) / 255.0;
     xxyyzz = exp(2.0 * lnScaleMin + vec3(uXxyyzz) * diagScale);
 
-    vec3 xyxzyzCor = tanh(vec3(iXyxzyzCor) / 127.0 * ATANH_COR_MAX);
+    vec3 stored = tanh(vec3(iXyxzyzCor) / 127.0 * ATANH_COR_MAX);
+    float spread = sqrt((1.0 - stored.x) * (1.0 + stored.x) * (1.0 - stored.y) * (1.0 + stored.y));
+    vec3 xyxzyzCor = vec3(stored.xy, stored.z * spread + stored.x * stored.y);
     xyxzyz = xyxzyzCor * vec3(
         sqrt(xxyyzz.x * xxyyzz.y),
         sqrt(xxyyzz.x * xxyyzz.z),
